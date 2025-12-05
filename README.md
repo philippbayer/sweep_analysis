@@ -20,6 +20,8 @@ https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0041307
 
 # Data
 
+All links via https://plantgarden.jp/ja/download/Chlamydomonas_reinhardtii/t3055.G001/
+
 Annotation:
 
 https://plantgarden.jp/ja/download/Chlamydomonas_reinhardtii/t3055.G001/Creinhardtii_281_v5.6.gene.gff3.gz

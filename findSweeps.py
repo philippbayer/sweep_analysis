@@ -12,6 +12,8 @@ import re
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
+import pandas as pd
+import numpy as np
 
 class SelectionExperimentAnalyzer:
     def __init__(self, vcf_dir=".", output_dir="sweep_analysis", window_size=50000, 
@@ -210,60 +212,59 @@ class SelectionExperimentAnalyzer:
         subprocess.run(cmd, check=True, capture_output=True)
         return f"{output_prefix}.hap.ld"
     
+   
     def summarize_ld_by_window(self, ld_file, label):
         """Summarize LD statistics into genomic windows"""
         import pandas as pd
         import numpy as np
-        
+
         print(f"  Summarizing LD for {label}...")
-        
+
         try:
-            ld_data = pd.read_csv(ld_file, sep='\t')
-        except:
-            print(f"  Warning: Could not read LD file {ld_file}")
-            return None
-        
+          ld_data = pd.read_csv(ld_file, sep='\t')
+        except Exception as e:
+          print(f"  Warning: Could not read LD file {ld_file}: {e}")
+          return None
+
         if len(ld_data) == 0:
-            print(f"  Warning: No LD data in {ld_file}")
-            return None
-        
+          print(f"  Warning: No LD data in {ld_file}")
+          return None
+
         windows = []
-        
         chroms = ld_data['CHR'].unique()
-        
+
         for chrom in chroms:
-            chrom_data = ld_data[ld_data['CHR'] == chrom]
-            
-            max_pos = max(chrom_data['POS1'].max(), chrom_data['POS2'].max())
-            
-            for window_start in range(0, int(max_pos), self.step_size):
-                window_end = window_start + self.window_size
-                
-                window_ld = chrom_data[
-                    ((chrom_data['POS1'] >= window_start) & (chrom_data['POS1'] < window_end)) |
-                    ((chrom_data['POS2'] >= window_start) & (chrom_data['POS2'] < window_end))
-                ]
-                
-                if len(window_ld) > 0:
-                    windows.append({
-                        'CHROM': chrom,
-                        'BIN_START': window_start,
-                        'BIN_END': window_end,
-                        'POS': window_start + self.window_size // 2,
-                        'MEAN_R2': window_ld['R^2'].mean(),
-                        'MEDIAN_R2': window_ld['R^2'].median(),
-                        'MAX_R2': window_ld['R^2'].max(),
-                        'N_PAIRS': len(window_ld)
-                    })
-        
+          chrom_data = ld_data[ld_data['CHR'] == chrom]
+          max_pos = max(chrom_data['POS1'].max(), chrom_data['POS2'].max())
+
+          for window_start in range(0, int(max_pos), self.step_size):
+            window_end = window_start + self.window_size
+
+            # SNP pairs where at least one SNP is inside this window
+            window_ld = chrom_data[
+              ((chrom_data['POS1'] >= window_start) & (chrom_data['POS1'] < window_end)) |
+              ((chrom_data['POS2'] >= window_start) & (chrom_data['POS2'] < window_end))
+            ]
+
+            if len(window_ld) > 0:
+              windows.append({
+                'CHROM': chrom,
+                'BIN_START': window_start,
+                'BIN_END': window_end,
+                'POS': window_start + self.window_size // 2,
+                'MEAN_R2': window_ld['R^2'].mean(),
+                'MEDIAN_R2': window_ld['R^2'].median(),
+                'MAX_R2': window_ld['R^2'].max(),
+                'N_PAIRS': len(window_ld)
+              })
+
         summary = pd.DataFrame(windows)
-        
         output_file = self.output_dir / f"{label}_ld_summary.txt"
         summary.to_csv(output_file, sep='\t', index=False)
-        
+
         print(f"LD summary saved: {output_file}")
         return output_file
-    
+       
     def calculate_statistics_parallel(self, vcf_file, label):
         """Calculate Tajima's D, pi, and LD in parallel"""
         with ProcessPoolExecutor(max_workers=3) as executor:
@@ -339,82 +340,203 @@ class SelectionExperimentAnalyzer:
             fst = fst_future.result()
         
         print("Step 4/4: Identifying candidate regions...")
-        self.identify_sweep_candidates(tajima1, tajima2, pi1, pi2, ld1, ld2, 
-                                      fst, comparison_name, results_dir)
         
+        self.identify_selective_sweeps(
+          tajima1, tajima2, pi1, pi2, ld1, ld2,  # <-- use the LD summaries produced earlier
+          fst,
+          comparison_name,
+          results_dir)
+
         return results_dir
-    
-    def identify_sweep_candidates(self, tajima1, tajima2, pi1, pi2, fst_file, 
-                                  comparison_name, output_dir):
-        """Identify candidate sweep regions for this comparison"""
-        import pandas as pd
-        import numpy as np
-        
-        taj1 = pd.read_csv(tajima1, sep='\t')
-        taj2 = pd.read_csv(tajima2, sep='\t')
-        pi1_data = pd.read_csv(pi1, sep='\t')
-        pi2_data = pd.read_csv(pi2, sep='\t')
-        fst = pd.read_csv(fst_file, sep='\t')
-        
-        taj1 = taj1[taj1['TajimaD'].notna()]
-        taj2 = taj2[taj2['TajimaD'].notna()]
-        pi1_data = pi1_data[pi1_data['PI'].notna()]
-        pi2_data = pi2_data[pi2_data['PI'].notna()]
-        fst = fst[fst['WEIGHTED_FST'].notna()]
-        
-        taj1['POS'] = (taj1['BIN_START'] + self.window_size // 2).astype(int)
-        taj2['POS'] = (taj2['BIN_START'] + self.window_size // 2).astype(int)
-        pi1_data['POS'] = ((pi1_data['BIN_START'] + pi1_data['BIN_END']) // 2).astype(int)
-        pi2_data['POS'] = ((pi2_data['BIN_START'] + pi2_data['BIN_END']) // 2).astype(int)
-        fst['POS'] = ((fst['BIN_START'] + fst['BIN_END']) // 2).astype(int)
-        
-        merged = (taj1[['CHROM', 'POS', 'TajimaD']].rename(columns={'TajimaD': 'TajimaD_1'})
-                  .merge(taj2[['CHROM', 'POS', 'TajimaD']].rename(columns={'TajimaD': 'TajimaD_2'}), 
-                         on=['CHROM', 'POS'], how='outer')
-                  .merge(pi1_data[['CHROM', 'POS', 'PI']].rename(columns={'PI': 'PI_1'}), 
-                         on=['CHROM', 'POS'], how='outer')
-                  .merge(pi2_data[['CHROM', 'POS', 'PI']].rename(columns={'PI': 'PI_2'}), 
-                         on=['CHROM', 'POS'], how='outer')
-                  .merge(fst[['CHROM', 'POS', 'WEIGHTED_FST']], 
-                         on=['CHROM', 'POS'], how='outer'))
-        
-        merged['Delta_TajimaD'] = merged['TajimaD_1'] - merged['TajimaD_2']
-        merged['Delta_PI'] = merged['PI_1'] - merged['PI_2']
-        
-        candidates = merged.copy()
-        
-        fst_threshold = np.percentile(candidates['WEIGHTED_FST'].dropna(), 95) if candidates['WEIGHTED_FST'].notna().sum() > 0 else 0
-        taj1_threshold = np.percentile(candidates['TajimaD_1'].dropna(), 5) if candidates['TajimaD_1'].notna().sum() > 0 else 0
-        pi1_threshold = np.percentile(candidates['PI_1'].dropna(), 5) if candidates['PI_1'].notna().sum() > 0 else 0
-        
-        high_fst = candidates['WEIGHTED_FST'] > fst_threshold
-        low_taj1 = candidates['TajimaD_1'] < taj1_threshold
-        low_pi1 = candidates['PI_1'] < pi1_threshold
-        
-        strong_candidates = candidates[high_fst & (low_taj1 | low_pi1)].copy()
-        strong_candidates = strong_candidates.sort_values('WEIGHTED_FST', ascending=False)
-        
-        output_file = output_dir / "candidate_sweep_regions.txt"
-        with open(output_file, 'w') as f:
-            f.write(f"# Candidate Selective Sweep Regions\n")
-            f.write(f"# Comparison: {comparison_name}\n")
-            f.write(f"# Window size: {self.window_size} bp\n")
-            f.write(f"# Criteria: High Fst (top 5%) AND (Low Tajima's D OR Low pi in treatment 1)\n")
-            f.write(f"#\n")
-            f.write(f"# Found {len(strong_candidates)} candidate regions\n\n")
-            
-            if len(strong_candidates) > 0:
-                f.write(strong_candidates.to_string(index=False))
-            else:
-                f.write("No strong candidates found with current thresholds.\n")
-        
-        merged_file = output_dir / "all_statistics.csv.gz"
-        merged.to_csv(merged_file, index=False, compression='gzip')
-        
-        print(f"Found {len(strong_candidates)} strong candidate regions")
-        
-        return strong_candidates
-    
+   
+    def identify_selective_sweeps(
+      self,
+      tajima1, tajima2,
+      pi1, pi2,
+      ld1_summary, ld2_summary,
+      fst_file,
+      comparison_name,
+      output_dir,
+      # Tunable thresholds / defaults
+      fst_quantile=95,
+      pi_quantile=5,
+      tajima_quantile=5,
+      ld_quantile=95,
+      min_ld_pairs=50,
+      min_ld_ratio=1.5,
+      min_ld_delta=0.15
+    ):
+      """
+      Identify candidate sweep regions integrating FST, Tajima's D, pi, and LD.
+
+      Treatment 1 is assumed to be the 'selected' treatment in the comparison
+      (consistent with your current candidate logic).
+
+      Criteria (defaults):
+        - High FST (top 5%)
+        - (Low Tajima's D OR Low pi) in treatment 1 (bottom 5%)
+        - High LD in treatment 1 (top 5% MEAN_R2, with enough pairs)
+        - LD enriched vs treatment 2 (ratio >= min_ld_ratio OR delta >= min_ld_delta)
+
+      Also classifies sweep type as 'hard' (very high LD), 'soft' (moderate LD), or 'unclear'.
+      """
+
+      taj1 = pd.read_csv(tajima1, sep='\t')
+      taj2 = pd.read_csv(tajima2, sep='\t')
+      pi1_data = pd.read_csv(pi1, sep='\t')
+      pi2_data = pd.read_csv(pi2, sep='\t')
+      fst = pd.read_csv(fst_file, sep='\t')
+
+      ld1 = pd.read_csv(ld1_summary, sep='\t') if ld1_summary is not None else pd.DataFrame()
+      ld2 = pd.read_csv(ld2_summary, sep='\t') if ld2_summary is not None else pd.DataFrame()
+
+      # --- Clean / midpoints ---
+      taj1 = taj1[taj1['TajimaD'].notna()].copy()
+      taj2 = taj2[taj2['TajimaD'].notna()].copy()
+      pi1_data = pi1_data[pi1_data['PI'].notna()].copy()
+      pi2_data = pi2_data[pi2_data['PI'].notna()].copy()
+      fst = fst[fst['WEIGHTED_FST'].notna()].copy()
+
+      taj1['POS'] = (taj1['BIN_START'] + self.window_size // 2).astype(int)
+      taj2['POS'] = (taj2['BIN_START'] + self.window_size // 2).astype(int)
+      pi1_data['POS'] = ((pi1_data['BIN_START'] + pi1_data['BIN_END']) // 2).astype(int)
+      pi2_data['POS'] = ((pi2_data['BIN_START'] + pi2_data['BIN_END']) // 2).astype(int)
+      fst['POS'] = ((fst['BIN_START'] + fst['BIN_END']) // 2).astype(int)
+
+      # LD summaries already have BIN_START/BIN_END/POS from summarize_ld_by_window
+      def rename_ld(df, suffix):
+        if df.empty:
+          return df
+        cols = {
+          'MEAN_R2': f'MEAN_R2_{suffix}',
+          'MEDIAN_R2': f'MEDIAN_R2_{suffix}',
+          'MAX_R2': f'MAX_R2_{suffix}',
+          'N_PAIRS': f'N_PAIRS_{suffix}',
+        }
+        return df.rename(columns=cols)
+
+      ld1 = rename_ld(ld1, '1')
+      ld2 = rename_ld(ld2, '2')
+
+      # --- Merge all statistics by CHROM + POS ---
+      merged = (
+        taj1[['CHROM' if 'CHROM' in taj1.columns else 'CHROM', 'POS', 'TajimaD']]
+          .rename(columns={'TajimaD': 'TajimaD_1', 'CHROM': 'CHROM'})
+        .merge(
+          taj2[['CHROM' if 'CHROM' in taj2.columns else 'CHROM', 'POS', 'TajimaD']]
+            .rename(columns={'TajimaD': 'TajimaD_2', 'CHROM': 'CHROM'}),
+          on=['CHROM', 'POS'], how='outer'
+        )
+        .merge(
+          pi1_data[['CHROM' if 'CHROM' in pi1_data.columns else 'CHROM', 'POS', 'PI']]
+            .rename(columns={'PI': 'PI_1', 'CHROM': 'CHROM'}),
+          on=['CHROM', 'POS'], how='outer'
+        )
+        .merge(
+          pi2_data[['CHROM' if 'CHROM' in pi2_data.columns else 'CHROM', 'POS', 'PI']]
+            .rename(columns={'PI': 'PI_2', 'CHROM': 'CHROM'}),
+          on=['CHROM', 'POS'], how='outer'
+        )
+        .merge(
+          fst[['CHROM' if 'CHROM' in fst.columns else 'CHROM', 'POS', 'WEIGHTED_FST']]
+            .rename(columns={'CHROM': 'CHROM'}),
+          on=['CHROM', 'POS'], how='outer'
+        )
+      )
+
+      # Bring in LD (outer merge so windows without LD still show up)
+      if not ld1.empty:
+        merged = merged.merge(ld1[['CHROM', 'POS', 'MEAN_R2_1', 'MEDIAN_R2_1', 'MAX_R2_1', 'N_PAIRS_1']],
+                    on=['CHROM', 'POS'], how='left')
+      if not ld2.empty:
+        merged = merged.merge(ld2[['CHROM', 'POS', 'MEAN_R2_2', 'MEDIAN_R2_2', 'MAX_R2_2', 'N_PAIRS_2']],
+                    on=['CHROM', 'POS'], how='left')
+
+      # Deltas / ratios
+      merged['Delta_TajimaD'] = merged['TajimaD_1'] - merged['TajimaD_2']
+      merged['Delta_PI']      = merged['PI_1']      - merged['PI_2']
+      merged['Delta_MEAN_R2'] = merged.get('MEAN_R2_1', np.nan) - merged.get('MEAN_R2_2', np.nan)
+      merged['LD_RATIO']      = merged.get('MEAN_R2_1', np.nan) / (merged.get('MEAN_R2_2', np.nan) + 1e-9)
+
+      # --- Thresholds with fallbacks ---
+      def q_safe(x, q, default):
+        x = x.dropna()
+        return (np.percentile(x, q) if len(x) > 0 else default)
+
+      fst_thr   = q_safe(merged['WEIGHTED_FST'], fst_quantile, 0.15)    # fallback typical strong FST
+      taj1_thr  = q_safe(merged['TajimaD_1'], tajima_quantile, -1.0)    # negative Tajima's D
+      pi1_thr   = q_safe(merged['PI_1'],       pi_quantile,    merged['PI_1'].median() * 0.5 if merged['PI_1'].notna().sum() else 0.0)
+      ld1_thr   = q_safe(merged['MEAN_R2_1'],  ld_quantile,    0.5)     # high LD ~0.5 mean r^2
+
+      # --- Criteria flags ---
+      high_fst   = merged['WEIGHTED_FST'] >= fst_thr
+      low_taj1   = merged['TajimaD_1']    <= taj1_thr
+      low_pi1    = merged['PI_1']         <= pi1_thr
+      enough_ld1 = merged.get('N_PAIRS_1', 0).fillna(0) >= min_ld_pairs
+      high_ld1   = (merged.get('MEAN_R2_1', np.nan) >= ld1_thr) & enough_ld1
+      ld_enriched = (merged['LD_RATIO'] >= min_ld_ratio) | (merged['Delta_MEAN_R2'] >= min_ld_delta)
+
+      # Final candidate filter (concordant signals)
+      strong = merged[high_fst & (low_taj1 | low_pi1) & high_ld1 & ld_enriched].copy()
+
+      # Sweep type classification (simple LD-based heuristic)
+      def classify_row(r):
+        if pd.notna(r.get('MAX_R2_1')) and pd.notna(r.get('MEAN_R2_1')):
+          if (r['MAX_R2_1'] >= 0.80) and (r['MEAN_R2_1'] >= 0.60) and (r.get('N_PAIRS_1', 0) >= min_ld_pairs):
+            return 'hard'
+          elif (r['MEAN_R2_1'] >= 0.40) and (r.get('N_PAIRS_1', 0) >= min_ld_pairs):
+            return 'soft'
+        return 'unclear'
+
+      strong['SWEEP_TYPE'] = strong.apply(classify_row, axis=1)
+
+      # Composite score (z-scores of independent signals)
+      def zscore(s):
+        s = s.astype(float)
+        mu = np.nanmean(s)
+        sd = np.nanstd(s)
+        return (s - mu) / sd if sd > 0 else s * 0.0
+
+      strong['SWEEP_SCORE'] = (
+        zscore(merged.loc[strong.index, 'WEIGHTED_FST']) +
+        zscore(-merged.loc[strong.index, 'PI_1']) +
+        zscore(merged.loc[strong.index, 'Delta_MEAN_R2'])
+      )
+
+      strong = strong.sort_values(['SWEEP_SCORE', 'WEIGHTED_FST'], ascending=[False, False])
+
+      output_file = output_dir / "candidate_sweep_regions.txt"
+      with open(output_file, 'w') as f:
+        f.write(f"# Candidate Selective Sweep Regions (LD-integrated)\n")
+        f.write(f"# Comparison: {comparison_name}\n")
+        f.write(f"# Window size: {self.window_size} bp\n")
+        f.write("# Criteria:\n")
+        f.write(f"#   High FST (>= {fst_thr:.3f}; top {fst_quantile}%) AND\n")
+        f.write(f"#   (Low Tajima's D (<= {taj1_thr:.3f}; bottom {tajima_quantile}%) OR Low pi (<= {pi1_thr:.6g}; bottom {pi_quantile}%)) AND\n")
+        f.write(f"#   High LD in treatment 1 (MEAN_R2 >= {ld1_thr:.3f}; top {ld_quantile}% with N_PAIRS >= {min_ld_pairs}) AND\n")
+        f.write(f"#   LD enriched vs treatment 2 (LD_RATIO >= {min_ld_ratio} OR Delta_MEAN_R2 >= {min_ld_delta})\n")
+        f.write("#\n")
+        f.write(f"# Found {len(strong)} candidate regions\n\n")
+        if len(strong) > 0:
+          cols_to_print = [
+            'CHROM', 'POS', 'BIN_START', 'BIN_END',
+            'WEIGHTED_FST',
+            'TajimaD_1', 'PI_1',
+            'MEAN_R2_1', 'MEDIAN_R2_1', 'MAX_R2_1', 'N_PAIRS_1',
+            'MEAN_R2_2', 'MEDIAN_R2_2', 'MAX_R2_2', 'N_PAIRS_2',
+            'LD_RATIO', 'Delta_MEAN_R2',
+            'SWEEP_TYPE', 'SWEEP_SCORE'
+          ]
+          existing = [c for c in cols_to_print if c in strong.columns]
+          f.write(strong[existing].to_string(index=False))
+        else:
+          f.write("No candidates found with current thresholds.\n")
+
+      merged_file = output_dir / "all_statistics.csv.gz"
+      merged.to_csv(merged_file, index=False, compression='gzip')
+
+      print(f"LD-integrated candidates: {len(strong)}")
+     
     def run_all_comparisons(self):
         """Run all possible comparisons"""
         
@@ -592,8 +714,8 @@ if __name__ == "__main__":
     analyzer = SelectionExperimentAnalyzer(
         vcf_dir=vcf_dir,
         output_dir="sweep_analysis_results",
-        window_size=50000,
-        step_size=10000,
+        window_size=50000,   # 50kb windows
+        step_size=10000,     # 10kb steps
         threads=threads,
         ploidy=1             # 1 for haploid, 2 for diploid
     )
