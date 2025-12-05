@@ -84,9 +84,137 @@ class SelectionExperimentAnalyzer:
         self.lineages = lineages
         return files
     
+
+    def make_plink_from_vcf(self, vcf_file, keep_samples_file, out_prefix):
+        """
+        Create a PLINK binary dataset from a VCF, restricted to a set of samples.
+        Uses PLINK 1.9. Produces files: .bed/.bim/.fam with prefix out_prefix.
+        """
+        # PLINK requires SNP IDs; we keep allele order and extra chr names
+        cmd = [
+            'plink',
+            '--vcf', vcf_file,
+            '--keep', keep_samples_file,
+            '--double-id',                  # set FID=IID; avoids empty IDs
+            '--allow-extra-chr',            # allow nonstandard chromosome names
+            '--keep-allele-order',          # avoid allele swaps
+            '--make-bed',
+            '--out', out_prefix
+        ]
+        # Haploid data: PLINK 1.9 represents haploid male X; for general haploids,
+        # we prefer treating missing heterozygotes as missing
+        # (optional; uncomment if needed)
+        # cmd += ['--set-hh-missing']
+
+        print(f"  Building PLINK dataset: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True, capture_output=True)
+
+
+    def calculate_ld_plink(self, plink_prefix, label, max_distance_bp=50000):
+        """
+        Compute LD (R^2) using PLINK 1.9 within a treatment dataset.
+        Outputs: {output_dir}/{label}_plink.ld.gz
+        """
+        out_prefix = self.output_dir / f"{label}_plink"
+        ld_window_kb = max(1, max_distance_bp // 1000)
+
+        cmd = [
+            'plink',
+            '--bfile', plink_prefix,
+            '--r2', 'gz',                 # write .ld.gz
+            '--ld-window-kb', str(ld_window_kb),
+            '--ld-window', '99999',       # allow many pairs
+            '--ld-window-r2', '0',        # include all pairs
+            '--allow-extra-chr',
+            '--out', str(out_prefix)
+        ]
+        print(f"  PLINK LD: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True, capture_output=True)
+
+        ld_gz = f"{out_prefix}.ld.gz"
+        # We will parse this file in summarize_ld_by_window_plink
+
+
+    def summarize_ld_by_window_plink(self, ld_gz_file, label):
+        """
+        Summarize PLINK LD output (.ld.gz) into genomic windows.
+        Produces {output_dir}/{label}_ld_summary.txt with:
+          CHROM, BIN_START, BIN_END, POS, MEAN_R2, MEDIAN_R2, MAX_R2, N_PAIRS
+        """
+        import pandas as pd
+        import numpy as np
+
+        print(f"  Summarizing PLINK LD for {label}...")
+
+        try:
+            # PLINK's .ld.gz is space-separated or tab-separated; use delim_whitespace for robustness.
+            ld = pd.read_csv(ld_gz_file, sep=r'\s+', compression='gzip', engine='python')
+        except Exception as e:
+            print(f"  Warning: Could not read PLINK LD file {ld_gz_file}: {e}")
+            return None
+
+        # Expected columns: CHR, BP_A, BP_B, R2 or CHR_A/CHR_B variant
+        # Normalize column names
+        colmap = {}
+        for c in ld.columns:
+            lc = c.lower()
+            if lc in ('chr', 'chrom', 'chromosome'):
+                colmap[c] = 'CHR'
+            elif lc in ('bp_a', 'pos_a', 'bp1', 'pos1'):
+                colmap[c] = 'BP_A'
+            elif lc in ('bp_b', 'pos_b', 'bp2', 'pos2'):
+                colmap[c] = 'BP_B'
+            elif lc == 'r2':
+                colmap[c] = 'R2'
+        ld = ld.rename(columns=colmap)
+
+        required = {'CHR', 'BP_A', 'BP_B', 'R2'}
+        if not required.issubset(set(ld.columns)):
+            print(f"  Warning: PLINK LD file missing required columns {required - set(ld.columns)}")
+            return None
+
+        # Filter invalid R2 values
+        ld = ld.replace([np.inf, -np.inf], np.nan)
+        ld = ld.dropna(subset=['R2'])
+        if len(ld) == 0:
+            print("  Warning: No valid LD pairs after cleaning; skipping LD summary.")
+            return None
+
+        windows = []
+        for chrom in ld['CHR'].unique():
+            chrom_df = ld[ld['CHR'] == chrom].copy()
+            max_pos = int(max(chrom_df['BP_A'].max(), chrom_df['BP_B'].max()))
+
+            for window_start in range(0, max_pos + 1, self.step_size):
+                window_end = window_start + self.window_size
+                window_ld = chrom_df[
+                    ((chrom_df['BP_A'] >= window_start) & (chrom_df['BP_A'] < window_end)) |
+                    ((chrom_df['BP_B'] >= window_start) & (chrom_df['BP_B'] < window_end))
+                ]
+                if len(window_ld) > 0:
+                    windows.append({
+                        'CHROM': chrom,
+                        'BIN_START': window_start,
+                        'BIN_END': window_end,
+                        'POS': window_start + self.window_size // 2,
+                        'MEAN_R2': window_ld['R2'].mean(),
+                        'MEDIAN_R2': window_ld['R2'].median(),
+                        'MAX_R2': window_ld['R2'].max(),
+                        'N_PAIRS': int(len(window_ld))
+                    })
+
+        if not windows:
+            print("  Warning: No LD pairs landed in any windows; skipping LD summary.")
+            return None
+
+        summary = pd.DataFrame(windows)
+        out_file = self.output_dir / f"{label}_ld_summary.txt"
+        summary.to_csv(out_file, sep='\t', index=False)
+        print(f"LD summary saved: {out_file}")
+
     def check_dependencies(self):
         """Check if required tools are installed"""
-        required_tools = ['vcftools', 'bcftools', 'bgzip', 'tabix']
+        required_tools = ['vcftools', 'bcftools', 'bgzip', 'tabix', 'plink']
         missing = []
         
         for tool in required_tools:
@@ -265,21 +393,38 @@ class SelectionExperimentAnalyzer:
         print(f"LD summary saved: {output_file}")
         return output_file
        
-    def calculate_statistics_parallel(self, vcf_file, label):
-        """Calculate Tajima's D, pi, and LD in parallel"""
+
+    def calculate_statistics_parallel(self, vcf_file, label, keep_samples_file=None):
+        """Calculate Tajima's D, pi, and LD in parallel (LD via PLINK)."""
+        # If keep_samples_file is provided, build PLINK dataset restricted to those samples
+        # Otherwise, use all samples in the VCF (create a temp keep list from the VCF)
+        if keep_samples_file is None:
+            tmp_keep = self.output_dir / f"{label}_samples.keep.txt"
+            samples = self.get_sample_ids(vcf_file)
+            with open(tmp_keep, 'w') as f:
+                for s in samples:
+                    f.write(f"{s}\n")
+            keep_samples_file = str(tmp_keep)
+
+        plink_prefix = str(self.output_dir / f"{label}_plink_dataset")
+
         with ProcessPoolExecutor(max_workers=3) as executor:
-            tajima_future = executor.submit(self.calculate_tajimas_d, vcf_file, label)
-            pi_future = executor.submit(self.calculate_pi, vcf_file, label)
-            ld_future = executor.submit(self.calculate_ld, vcf_file, label)
-            
-            tajima_file = tajima_future.result()
-            pi_file = pi_future.result()
-            ld_file = ld_future.result()
-            
-            ld_summary = self.summarize_ld_by_window(ld_file, label)
-        
+            tajima_f = executor.submit(self.calculate_tajimas_d, vcf_file, label)
+            pi_f     = executor.submit(self.calculate_pi, vcf_file, label)
+
+            # Build PLINK dataset, then compute LD + summarize
+            def ld_workflow():
+                self.make_plink_from_vcf(vcf_file, keep_samples_file, plink_prefix)
+                ld_gz = self.calculate_ld_plink(plink_prefix, label)
+                return self.summarize_ld_by_window_plink(ld_gz, label)
+
+            ld_f     = executor.submit(ld_workflow)
+
+            tajima_file = tajima_f.result()
+            pi_file     = pi_f.result()
+            ld_summary  = ld_f.result()
         return tajima_file, pi_file, ld_summary
-    
+
     def analyze_comparison(self, treatment1_vcfs, treatment2_vcfs, comparison_name):
         """Analyze a specific treatment comparison"""
         print(f"\n{'='*60}")
@@ -307,26 +452,27 @@ class SelectionExperimentAnalyzer:
         self.create_sample_file([merged1], str(pop1_samples))
         self.create_sample_file([merged2], str(pop2_samples))
         
+
+
         print("Step 3/4: Calculating statistics...")
         combined_vcf = results_dir / "combined.vcf"
         combined_vcf = self.merge_vcf_files([merged1, merged2], str(combined_vcf))
-        
+
         with ProcessPoolExecutor(max_workers=3) as executor:
-            # Tajima, pi, and LD for treatment 1
             stats1_future = executor.submit(
-                self.calculate_statistics_parallel, 
-                merged1, 
-                f"{comparison_name.split()[0]}"
+                self.calculate_statistics_parallel,
+                merged1,
+                f"{comparison_name.split()[0]}",
+                keep_samples_file=str(pop1_samples)   # ensure LD within treatment 1
             )
-            
-            # Tajima, pi, and LD for treatment 2
+
             stats2_future = executor.submit(
                 self.calculate_statistics_parallel,
                 merged2,
-                f"{comparison_name.split()[2]}"
+                f"{comparison_name.split()[2]}",
+                keep_samples_file=str(pop2_samples)   # ensure LD within treatment 2
             )
-            
-            # Fst
+
             fst_future = executor.submit(
                 self.calculate_fst,
                 str(combined_vcf),
@@ -334,18 +480,16 @@ class SelectionExperimentAnalyzer:
                 str(pop2_samples),
                 comparison_name.replace(' ', '_')
             )
-            
+
             tajima1, pi1, ld1 = stats1_future.result()
             tajima2, pi2, ld2 = stats2_future.result()
             fst = fst_future.result()
-        
+
         print("Step 4/4: Identifying candidate regions...")
-        
         self.identify_selective_sweeps(
-          tajima1, tajima2, pi1, pi2, ld1, ld2,  # <-- use the LD summaries produced earlier
-          fst,
-          comparison_name,
-          results_dir)
+            tajima1, tajima2, pi1, pi2, ld1, ld2, fst,
+            comparison_name, results_dir
+        )
 
         return results_dir
    
