@@ -1,0 +1,6 @@
+*.bam
+*vcf
+*gz
+*fastq.gz
+*bai
+*idx
