@@ -4,8 +4,8 @@
 #SBATCH --ntasks=1
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=32
+#SBATCH --mem=100G
 #SBATCH --partition=work
-
 
 source /software/projects/pawsey0390/pbayer/conda/etc/profile.d/conda.sh
 
