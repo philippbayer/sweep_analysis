@@ -89,6 +89,7 @@ class SelectionExperimentAnalyzer:
         """
         Create a PLINK binary dataset from a VCF, restricted to a set of samples.
         Uses PLINK 1.9. Produces files: .bed/.bim/.fam with prefix out_prefix.
+        Thins SNPs to reduce memory usage in LD calculations.
         """
         # PLINK requires SNP IDs; we keep allele order and extra chr names
         cmd = [
@@ -98,6 +99,7 @@ class SelectionExperimentAnalyzer:
             '--double-id',                  # set FID=IID; avoids empty IDs
             '--allow-extra-chr',            # allow nonstandard chromosome names
             '--keep-allele-order',          # avoid allele swaps
+            '--thin', '0.5',                # keep ~50% of SNPs randomly (reduces memory)
             '--make-bed',
             '--out', out_prefix
         ]
@@ -106,7 +108,7 @@ class SelectionExperimentAnalyzer:
         # (optional; uncomment if needed)
         # cmd += ['--set-hh-missing']
 
-        print(f"  Building PLINK dataset: {' '.join(cmd)}")
+        print(f"  Building PLINK dataset (thinned): {' '.join(cmd)}")
         subprocess.run(cmd, check=True, capture_output=True)
 
 
@@ -114,22 +116,23 @@ class SelectionExperimentAnalyzer:
         """
         Compute LD (R^2) using PLINK 1.9 within a treatment dataset.
         Outputs: {output_dir}/{label}_plink.ld.gz
-        Memory-efficient: Only keeps r2 >= 0.2 to reduce memory usage
+        Memory-efficient: Only keeps r2 >= 0.4, limited window
         """
         out_prefix = self.output_dir / f"{label}_plink"
-        ld_window_kb = max(1, max_distance_bp // 1000)
+        # Reduce window size for memory efficiency
+        ld_window_kb = min(25, max_distance_bp // 1000)  # max 25kb instead of 50kb
 
         cmd = [
             'plink',
             '--bfile', plink_prefix,
             '--r2', 'gz',                 # write .ld.gz
             '--ld-window-kb', str(ld_window_kb),
-            '--ld-window', '999',         # limit pairs per SNP to reduce memory
-            '--ld-window-r2', '0.2',      # only keep r2 >= 0.2 (reduces memory usage)
+            '--ld-window', '200',         # max 200 pairs per SNP (reduced from 999)
+            '--ld-window-r2', '0.4',      # only keep r2 >= 0.4 (increased from 0.2)
             '--allow-extra-chr',
             '--out', str(out_prefix)
         ]
-        print(f"  PLINK LD (memory-efficient, r2 >= 0.2): {' '.join(cmd)}")
+        print(f"  PLINK LD (low-memory mode: r2 >= 0.4, {ld_window_kb}kb window): {' '.join(cmd)}")
         subprocess.run(cmd, check=True, capture_output=True)
 
         ld_gz = f"{out_prefix}.ld.gz"
