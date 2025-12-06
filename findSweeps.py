@@ -420,21 +420,20 @@ class SelectionExperimentAnalyzer:
 
         plink_prefix = str(self.output_dir / f"{label}_plink_dataset")
 
-        with ProcessPoolExecutor(max_workers=3) as executor:
+        # Run Tajima's D and pi in parallel
+        with ProcessPoolExecutor(max_workers=2) as executor:
             tajima_f = executor.submit(self.calculate_tajimas_d, vcf_file, label)
             pi_f     = executor.submit(self.calculate_pi, vcf_file, label)
 
-            # Build PLINK dataset, then compute LD + summarize
-            def ld_workflow():
-                self.make_plink_from_vcf(vcf_file, keep_samples_file, plink_prefix)
-                ld_gz = self.calculate_ld_plink(plink_prefix, label)
-                return self.summarize_ld_by_window_plink(ld_gz, label)
-
-            ld_f     = executor.submit(ld_workflow)
-
             tajima_file = tajima_f.result()
             pi_file     = pi_f.result()
-            ld_summary  = ld_f.result()
+
+        # Run LD workflow sequentially (avoids pickling issues with nested functions)
+        self.make_plink_from_vcf(vcf_file, keep_samples_file, plink_prefix)
+        ld_gz_file = str(self.output_dir / f"{label}_plink.ld.gz")
+        self.calculate_ld_plink(plink_prefix, label)
+        ld_summary = self.summarize_ld_by_window_plink(ld_gz_file, label)
+
         return tajima_file, pi_file, ld_summary
 
     def analyze_comparison(self, treatment1_vcfs, treatment2_vcfs, comparison_name):
