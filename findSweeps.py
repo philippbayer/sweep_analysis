@@ -114,6 +114,7 @@ class SelectionExperimentAnalyzer:
         """
         Compute LD (R^2) using PLINK 1.9 within a treatment dataset.
         Outputs: {output_dir}/{label}_plink.ld.gz
+        Memory-efficient: Only keeps r2 >= 0.2 to reduce memory usage
         """
         out_prefix = self.output_dir / f"{label}_plink"
         ld_window_kb = max(1, max_distance_bp // 1000)
@@ -123,12 +124,12 @@ class SelectionExperimentAnalyzer:
             '--bfile', plink_prefix,
             '--r2', 'gz',                 # write .ld.gz
             '--ld-window-kb', str(ld_window_kb),
-            '--ld-window', '99999',       # allow many pairs
-            '--ld-window-r2', '0',        # include all pairs
+            '--ld-window', '999',         # limit pairs per SNP to reduce memory
+            '--ld-window-r2', '0.2',      # only keep r2 >= 0.2 (reduces memory usage)
             '--allow-extra-chr',
             '--out', str(out_prefix)
         ]
-        print(f"  PLINK LD: {' '.join(cmd)}")
+        print(f"  PLINK LD (memory-efficient, r2 >= 0.2): {' '.join(cmd)}")
         subprocess.run(cmd, check=True, capture_output=True)
 
         ld_gz = f"{out_prefix}.ld.gz"
