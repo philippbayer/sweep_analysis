@@ -157,12 +157,12 @@ class SelectionExperimentAnalyzer:
             print(f"  Warning: Could not read PLINK LD file {ld_gz_file}: {e}")
             return None
 
-        # Expected columns: CHR, BP_A, BP_B, R2 or CHR_A/CHR_B variant
-        # Normalize column names
+        # Expected columns: CHR_A, BP_A, SNP_A, CHR_B, BP_B, SNP_B, R2 (PLINK format)
+        # Normalize column names - use CHR_A as the chromosome
         colmap = {}
         for c in ld.columns:
             lc = c.lower()
-            if lc in ('chr', 'chrom', 'chromosome'):
+            if lc in ('chr', 'chrom', 'chromosome', 'chr_a'):
                 colmap[c] = 'CHR'
             elif lc in ('bp_a', 'pos_a', 'bp1', 'pos1'):
                 colmap[c] = 'BP_A'
@@ -619,21 +619,34 @@ class SelectionExperimentAnalyzer:
 
       # --- Thresholds with fallbacks ---
       def q_safe(x, q, default):
-        x = x.dropna()
+        if isinstance(x, (pd.Series, pd.DataFrame)):
+          x = x.dropna()
         return (np.percentile(x, q) if len(x) > 0 else default)
 
       fst_thr   = q_safe(merged['WEIGHTED_FST'], fst_quantile, 0.15)    # fallback typical strong FST
       taj1_thr  = q_safe(merged['TajimaD_1'], tajima_quantile, -1.0)    # negative Tajima's D
       pi1_thr   = q_safe(merged['PI_1'],       pi_quantile,    merged['PI_1'].median() * 0.5 if merged['PI_1'].notna().sum() else 0.0)
-      ld1_thr   = q_safe(merged['MEAN_R2_1'],  ld_quantile,    0.5)     # high LD ~0.5 mean r^2
+      # Handle missing LD data gracefully
+      if 'MEAN_R2_1' in merged.columns:
+        ld1_thr = q_safe(merged['MEAN_R2_1'], ld_quantile, 0.5)
+      else:
+        ld1_thr = 0.5
 
       # --- Criteria flags ---
       high_fst   = merged['WEIGHTED_FST'] >= fst_thr
       low_taj1   = merged['TajimaD_1']    <= taj1_thr
       low_pi1    = merged['PI_1']         <= pi1_thr
-      enough_ld1 = merged.get('N_PAIRS_1', 0).fillna(0) >= min_ld_pairs
-      high_ld1   = (merged.get('MEAN_R2_1', np.nan) >= ld1_thr) & enough_ld1
-      ld_enriched = (merged['LD_RATIO'] >= min_ld_ratio) | (merged['Delta_MEAN_R2'] >= min_ld_delta)
+
+      # Handle missing LD columns
+      has_ld = 'MEAN_R2_1' in merged.columns
+      if has_ld:
+        enough_ld1 = merged.get('N_PAIRS_1', 0).fillna(0) >= min_ld_pairs
+        high_ld1   = (merged.get('MEAN_R2_1', np.nan) >= ld1_thr) & enough_ld1
+        ld_enriched = (merged.get('LD_RATIO', np.nan) >= min_ld_ratio) | (merged.get('Delta_MEAN_R2', np.nan) >= min_ld_delta)
+      else:
+        # If no LD data, skip LD criteria
+        high_ld1 = pd.Series([True] * len(merged), index=merged.index)
+        ld_enriched = pd.Series([True] * len(merged), index=merged.index)
 
       # Final candidate filter (concordant signals)
       strong = merged[high_fst & (low_taj1 | low_pi1) & high_ld1 & ld_enriched].copy()
