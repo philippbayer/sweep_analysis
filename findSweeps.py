@@ -236,16 +236,19 @@ class SelectionExperimentAnalyzer:
         return samples
     
     def create_sample_file(self, vcf_files, output_file):
-        """Create a file with sample IDs from multiple VCF files"""
+        """Create a file with sample IDs from multiple VCF files
+        Format: FID IID (space-separated, for PLINK --keep)"""
         all_samples = set()
         for vcf in vcf_files:
             samples = self.get_sample_ids(vcf)
             all_samples.update(samples)
-        
+
         with open(output_file, 'w') as f:
             for sample in sorted(all_samples):
-                f.write(f"{sample}\n")
-        
+                # PLINK --keep requires FID and IID (family ID and individual ID)
+                # Using --double-id in PLINK, so we write the sample ID twice
+                f.write(f"{sample} {sample}\n")
+
         return output_file
     
     def prepare_vcf(self, vcf_file):
@@ -253,28 +256,35 @@ class SelectionExperimentAnalyzer:
         if not vcf_file.endswith('.gz'):
             vcf_gz = f"{vcf_file}.gz"
             if not Path(vcf_gz).exists():
-                subprocess.run(['bgzip', '-c', vcf_file], 
+                subprocess.run(['bgzip', '-c', vcf_file],
                              stdout=open(vcf_gz, 'w'), check=True)
+            else:
+                print(f"Compressed VCF already exists: {vcf_gz}, skipping compression")
             vcf_file = vcf_gz
-        
+
         if not Path(f"{vcf_file}.tbi").exists():
             subprocess.run(['tabix', '-p', 'vcf', vcf_file], check=True)
-        
+
         return vcf_file
     
     def merge_vcf_files(self, vcf_files, output_file):
         """Merge multiple VCF files efficiently"""
+        # Skip if output file already exists
+        if Path(output_file).exists():
+            print(f"Merged VCF already exists: {output_file}, skipping merge")
+            return output_file
+
         if len(vcf_files) == 1:
             return self.prepare_vcf(vcf_files[0])
-        
+
         print(f"Merging {len(vcf_files)} VCF files...")
-        
+
         with ProcessPoolExecutor(max_workers=self.threads) as executor:
             prepared = list(executor.map(self.prepare_vcf, vcf_files))
-        
+
         cmd = ['bcftools', 'merge', '-o', output_file, '--threads', str(self.threads)] + prepared
         subprocess.run(cmd, check=True)
-        
+
         return output_file
     
     def calculate_tajimas_d(self, vcf_file, label):
@@ -403,7 +413,9 @@ class SelectionExperimentAnalyzer:
             samples = self.get_sample_ids(vcf_file)
             with open(tmp_keep, 'w') as f:
                 for s in samples:
-                    f.write(f"{s}\n")
+                    # PLINK --keep requires FID and IID (family ID and individual ID)
+                    # Using --double-id in PLINK, so we write the sample ID twice
+                    f.write(f"{s} {s}\n")
             keep_samples_file = str(tmp_keep)
 
         plink_prefix = str(self.output_dir / f"{label}_plink_dataset")
