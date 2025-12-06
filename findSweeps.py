@@ -556,13 +556,26 @@ class SelectionExperimentAnalyzer:
       pi2_data = pi2_data[pi2_data['PI'].notna()].copy()
       fst = fst[fst['WEIGHTED_FST'].notna()].copy()
 
-      taj1['POS'] = (taj1['BIN_START'] + self.window_size // 2).astype(int)
-      taj2['POS'] = (taj2['BIN_START'] + self.window_size // 2).astype(int)
-      pi1_data['POS'] = ((pi1_data['BIN_START'] + pi1_data['BIN_END']) // 2).astype(int)
-      pi2_data['POS'] = ((pi2_data['BIN_START'] + pi2_data['BIN_END']) // 2).astype(int)
-      fst['POS'] = ((fst['BIN_START'] + fst['BIN_END']) // 2).astype(int)
+      # Standardize all windows to the same grid by rounding BIN_START to step_size
+      def standardize_bins(df):
+        # Round BIN_START down to nearest step_size multiple
+        df['BIN_START'] = (df['BIN_START'] // self.step_size) * self.step_size
+        df['POS'] = df['BIN_START'] + self.window_size // 2
+        return df
+
+      taj1 = standardize_bins(taj1)
+      taj2 = standardize_bins(taj2)
+      pi1_data = standardize_bins(pi1_data)
+      pi2_data = standardize_bins(pi2_data)
+      fst = standardize_bins(fst)
 
       # LD summaries already have BIN_START/BIN_END/POS from summarize_ld_by_window
+      # Standardize LD bins too
+      if not ld1.empty:
+        ld1 = standardize_bins(ld1)
+      if not ld2.empty:
+        ld2 = standardize_bins(ld2)
+
       def rename_ld(df, suffix):
         if df.empty:
           return df
